@@ -197,10 +197,12 @@ class Rocket(object):
 
         reward = dist_reward + pose_reward
 
+        # 离目标点越近、越竖直，奖励越高。
         if self.task == 'hover' and (dist_x**2 + dist_y**2)**0.5 <= 2*self.target_r:  # hit target
             reward = 0.25
         if self.task == 'hover' and (dist_x**2 + dist_y**2)**0.5 <= 1*self.target_r:  # hit target
             reward = 0.5
+        # 当倾斜角 > 90° 时，奖励清零（代表“倒了”）
         if self.task == 'hover' and abs(state['theta']) > 90 / 180 * np.pi:
             reward = 0
 
@@ -220,6 +222,7 @@ class Rocket(object):
 
         f, vphi = self.action_table[action]
 
+        # 计算推力方向与力矩
         ft, fr = -f*np.sin(phi), f*np.cos(phi)
         fx = ft*np.cos(theta) - fr*np.sin(theta)
         fy = ft*np.sin(theta) + fr*np.cos(theta)
