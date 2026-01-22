@@ -93,6 +93,8 @@ if __name__ == '__main__':
                 net.update_ac(net, rewards, log_probs, values, masks, Qval, gamma=0.999)
                 break
 
+            # print(f"step_id: {step_id}, state: {state}")
+
         REWARDS.append(np.sum(rewards))
         print('episode id: %d, episode reward: %.3f'
               % (episode_id, np.sum(rewards)))

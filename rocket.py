@@ -38,6 +38,13 @@ class Rocket(object):
         self.I = 1/12*self.H*self.H  # Moment of inertia
         self.dt = 0.05
 
+        # 不同推力->消耗燃料->质量变化对应值
+        self.mass_consumption = {
+            0.2 * self.g: 0.00021608,
+            1.0 * self.g: 0.00107996,
+            2.0 * self.g: 0.00215991
+        }
+
         self.world_x_min = -300  # meters
         self.world_x_max = 300
         self.world_y_min = -30
@@ -51,6 +58,7 @@ class Rocket(object):
 
         self.already_landing = False
         self.already_crash = False
+        self.already_fuel_empty = False
         self.max_steps = max_steps
 
         # viewport height x width (pixels)
@@ -62,7 +70,8 @@ class Rocket(object):
         self.state = self.create_random_state()
         self.action_table = self.create_action_table()
 
-        self.state_dims = 8
+        # 由于新增质量状态 m，state维度 8->9
+        self.state_dims = 9
         self.action_dims = len(self.action_table)
 
         if path_to_bg_img is None:
@@ -129,7 +138,9 @@ class Rocket(object):
             'x': x, 'y': y, 'vx': 0, 'vy': vy,
             'theta': theta, 'vtheta': 0,
             'phi': 0, 'f': 0,
-            't': 0, 'a_': 0
+            't': 0, 'a_': 0,
+            # 新增rocket质量状态 m
+            'm': 1.0
         }
 
         return state
@@ -177,6 +188,12 @@ class Rocket(object):
             return True if y <= 0 + self.H / 2.0 and v < 15.0 and abs(x) < self.target_r \
                            and abs(theta) < 10/180*np.pi and abs(vtheta) < 10/180*np.pi else False
 
+    def check_fuel_empty(self, state):
+        if state['m'] <= 0.5770925:
+            return True
+        else:
+            return False
+
     def calculate_reward(self, state):
 
         x_range = self.world_x_max - self.world_x_min
@@ -219,6 +236,7 @@ class Rocket(object):
         x, y, vx, vy = self.state['x'], self.state['y'], self.state['vx'], self.state['vy']
         theta, vtheta = self.state['theta'], self.state['vtheta']
         phi = self.state['phi']
+        m = self.state['m']
 
         f, vphi = self.action_table[action]
 
@@ -228,8 +246,15 @@ class Rocket(object):
         fy = ft*np.sin(theta) + fr*np.cos(theta)
 
         rho = 1 / (125/(self.g/2.0))**0.5  # suppose after 125 m free fall, then air resistance = mg
-        ax, ay = fx-rho*vx, fy-self.g-rho*vy
-        atheta = ft*self.H/2 / self.I
+        # 添加质量m变化，影响动力学模型
+        # ax, ay = fx-rho*vx, fy-self.g-rho*vy
+        ax = (fx - rho * vx) / m
+        ay = (fy - m * self.g - rho * vy) / m
+
+        # 由于质量变化引起转动惯量I变化，缩放因数恰好就是m，因为m初始值为1，当前值<1
+        mass_ratio = m
+        atheta = ft*self.H/2 / (self.I * mass_ratio)
+
 
         # update agent
         if self.already_landing:
@@ -248,19 +273,23 @@ class Rocket(object):
         phi = max(phi, -20/180*3.1415926)
         phi = min(phi, 20/180*3.1415926)
 
+        m_new = m - self.mass_consumption[f]
+
         self.state = {
             'x': x_new, 'y': y_new, 'vx': vx_new, 'vy': vy_new,
             'theta': theta_new, 'vtheta': vtheta_new,
             'phi': phi, 'f': f,
-            't': self.step_id, 'action_': action
+            't': self.step_id, 'action_': action,
+            'm': m_new
         }
         self.state_buffer.append(self.state)
 
         self.already_landing = self.check_landing_success(self.state)
         self.already_crash = self.check_crash(self.state)
+        self.already_fuel_empty = self.check_fuel_empty(self.state)
         reward = self.calculate_reward(self.state)
 
-        if self.already_crash or self.already_landing:
+        if self.already_crash or self.already_landing or self.already_fuel_empty:
             done = True
         else:
             done = False
@@ -270,7 +299,8 @@ class Rocket(object):
     def flatten(self, state):
         x = [state['x'], state['y'], state['vx'], state['vy'],
              state['theta'], state['vtheta'], state['t'],
-             state['phi']]
+             state['phi'],
+             state['m']]
         return np.array(x, dtype=np.float32)/100.
 
     def render(self, window_name='env', wait_time=1,
