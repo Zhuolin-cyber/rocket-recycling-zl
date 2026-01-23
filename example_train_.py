@@ -45,6 +45,13 @@ else:
     ckpts = sorted(glob.glob(os.path.join(ckpt_folder, "*.pt")))
     last_ckpt = ckpts[-1] if ckpts else None
 
+# 新增：子文件夹，用于保存对比分析需要的数据
+action_folder = os.path.join(ckpt_folder, "actions")
+mass_folder = os.path.join(ckpt_folder, "mass")
+os.makedirs(action_folder, exist_ok=True)
+os.makedirs(mass_folder, exist_ok=True)
+
+
 if __name__ == '__main__':
 
     max_m_episode = 800000
@@ -78,9 +85,18 @@ if __name__ == '__main__':
         # training loop
         state = env.reset()
         rewards, log_probs, values, masks = [], [], [], []
+
+        action_log = []
+        mass_log = []
+
         for step_id in range(max_steps):
             action, log_prob, value = net.get_action(state)
             state, reward, done, _ = env.step(action)
+
+            # ★ 新增：记录 action 和质量
+            action_log.append(int(action))
+            mass_log.append(state[8]*100)
+
             rewards.append(reward)
             log_probs.append(log_prob)
             values.append(value)
@@ -98,6 +114,22 @@ if __name__ == '__main__':
         REWARDS.append(np.sum(rewards))
         print('episode id: %d, episode reward: %.3f'
               % (episode_id, np.sum(rewards)))
+
+        # ★ 保存动作分布、质量变化曲线
+        np.save(os.path.join(action_folder, f"actions_{episode_id:08d}.npy"), np.array(action_log))
+        np.save(os.path.join(mass_folder, f"mass_{episode_id:08d}.npy"), np.array(mass_log))
+
+        # ★ Episode summary 用于未来对比三种动力学版本
+        episode_summary = {
+            "episode_id": episode_id,
+            "reward": float(np.sum(rewards)),
+            "steps": len(action_log),
+            "mass_consumed": float(mass_log[0] - mass_log[-1]),
+            "action_hist": {str(i): int(action_log.count(i)) for i in set(action_log)}
+        }
+
+        with open(os.path.join(ckpt_folder, "episode_summary.jsonl"), "a") as f:
+            f.write(json.dumps(episode_summary) + "\n")
 
         if episode_id % 100 == 1:
             plt.figure()
