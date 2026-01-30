@@ -2,7 +2,7 @@ import numpy as np
 import random
 import cv2
 import utils
-
+import os
 
 class Rocket(object):
     """
@@ -38,6 +38,68 @@ class Rocket(object):
         self.I = 1/12*self.H*self.H  # Moment of inertia
         self.dt = 0.05
 
+        # --- LUT geometry scaling ---
+        self.H_lut = 43.0  # 你的 LUT 对应的火箭高度（米）
+        self.com_scale = self.H / self.H_lut
+
+        # ==============================
+        # CoM LUT (xc, zc) from lookup
+        # Folder structure:
+        #   rocket.py
+        #   LUT_total_output/
+        #       LUT_total_xc.npy
+        #       LUT_total_zc.npy
+        #       theta_grid_rad.npy
+        #       total_mass_grid.npy
+        # ==============================
+        self.use_com_lut = True
+
+        self._com_dir = os.path.join(os.path.dirname(__file__), "LUT_total_output_check")
+
+        self.com_xc = None  # (Ntheta, Nm)
+        self.com_zc = None  # (Ntheta, Nm)
+        self.theta_grid = None  # rad, (Ntheta,)
+        self.mass_grid = None   # kg, (Nm,)
+        self.M0 = None          # initial total mass (kg), used to map m_ratio -> kg
+
+        try:
+            xc_path = os.path.join(self._com_dir, "LUT_total_xc.npy")
+            zc_path = os.path.join(self._com_dir, "LUT_total_zc.npy")
+            tg_path = os.path.join(self._com_dir, "theta_grid_rad.npy")
+            mg_path = os.path.join(self._com_dir, "total_mass_grid.npy")
+
+            self.com_xc = np.load(xc_path)
+            self.com_zc = np.load(zc_path)
+            self.theta_grid = np.load(tg_path).astype(float)
+            self.mass_grid = np.load(mg_path).astype(float)
+
+            # 用 mass_grid 的最大值当作初始总质量（kg），避免你在这里硬编码 45400
+            self.M0 = float(np.max(self.mass_grid))
+
+            # 基本一致性检查：表维度应为 (Ntheta, Nm)
+            if self.com_xc.shape != (len(self.theta_grid), len(self.mass_grid)):
+                # 如果你导出时转置了，就在这里修正一次
+                if self.com_xc.T.shape == (len(self.theta_grid), len(self.mass_grid)):
+                    self.com_xc = self.com_xc.T
+                else:
+                    raise ValueError("LUT_total_xc.npy shape mismatch with grids")
+
+            if self.com_zc.shape != (len(self.theta_grid), len(self.mass_grid)):
+                if self.com_zc.T.shape == (len(self.theta_grid), len(self.mass_grid)):
+                    self.com_zc = self.com_zc.T
+                else:
+                    raise ValueError("LUT_total_zc.npy shape mismatch with grids")
+
+        except Exception as e:
+            # 兜底：找不到表或不匹配就回到原来的 H/2 刚体模型
+            self.use_com_lut = False
+            self.com_xc = None
+            self.com_zc = None
+            self.theta_grid = None
+            self.mass_grid = None
+            self.M0 = None
+
+
         # 不同推力->消耗燃料->质量变化对应值
         self.mass_consumption = {
             0.2 * self.g: 0.00021608,
@@ -70,8 +132,8 @@ class Rocket(object):
         self.state = self.create_random_state()
         self.action_table = self.create_action_table()
 
-        # 由于新增质量状态 m，state维度 8->9
-        self.state_dims = 9
+        # 由于新增质量状态 m，state维度 8->9->11
+        self.state_dims = 11
         self.action_dims = len(self.action_table)
 
         if path_to_bg_img is None:
@@ -253,7 +315,16 @@ class Rocket(object):
 
         # 由于质量变化引起转动惯量I变化，缩放因数恰好就是m，因为m初始值为1，当前值<1
         mass_ratio = m
-        atheta = ft*self.H/2 / (self.I * mass_ratio)
+
+        # --- CoM from LUT (theta: -pi..pi supported) ---
+        xc, zc = self._get_com_from_lut(theta, mass_ratio)
+
+        # --- torque around CoM in 2D ---
+        # thrust components in body frame already computed: ft (side), fr (axial)
+        tau = zc * ft - xc * fr
+
+        # angular acceleration
+        atheta = tau / (self.I * mass_ratio)
 
 
         # update agent
@@ -297,11 +368,83 @@ class Rocket(object):
         return self.flatten(self.state), reward, done, None
 
     def flatten(self, state):
+        xc, zc = self._get_com_from_lut(state['theta'], state['m'])
         x = [state['x'], state['y'], state['vx'], state['vy'],
              state['theta'], state['vtheta'], state['t'],
              state['phi'],
-             state['m']]
+             state['m'],
+             xc, zc]
         return np.array(x, dtype=np.float32)/100.
+
+
+    def _wrap_to_pi(self, ang):
+        # wrap any angle to [-pi, pi]
+        return (ang + np.pi) % (2 * np.pi) - np.pi
+
+    def _bilinear_lookup(self, table, theta, mass):
+        """
+        table: (Ntheta, Nm)
+        theta: rad, will be wrapped to [-pi, pi]
+        mass:  kg, will be clipped into [mass_grid[0], mass_grid[-1]]
+        """
+        theta = self._wrap_to_pi(theta)
+
+        tg = self.theta_grid
+        mg = self.mass_grid
+
+        # clip to grid range
+        theta = float(np.clip(theta, tg[0], tg[-1]))
+        mass = float(np.clip(mass, mg[0], mg[-1]))
+
+        # locate theta interval
+        i1 = int(np.searchsorted(tg, theta, side="right"))
+        i1 = min(max(i1, 1), len(tg) - 1)
+        i0 = i1 - 1
+
+        # locate mass interval
+        j1 = int(np.searchsorted(mg, mass, side="right"))
+        j1 = min(max(j1, 1), len(mg) - 1)
+        j0 = j1 - 1
+
+        t0, t1 = tg[i0], tg[i1]
+        m0, m1 = mg[j0], mg[j1]
+
+        wt = 0.0 if (t1 == t0) else (theta - t0) / (t1 - t0)
+        wm = 0.0 if (m1 == m0) else (mass - m0) / (m1 - m0)
+
+        v00 = table[i0, j0]
+        v10 = table[i1, j0]
+        v01 = table[i0, j1]
+        v11 = table[i1, j1]
+
+        v0 = v00 * (1 - wt) + v10 * wt
+        v1 = v01 * (1 - wt) + v11 * wt
+        return float(v0 * (1 - wm) + v1 * wm)
+
+    def _get_com_from_lut(self, theta, m_ratio):
+        """
+        theta: rad (your state['theta'])
+        m_ratio: your state['m'], assumed in [0,1], where 1 means initial mass
+        return: (xc, zc) in meters, rocket body frame with origin at bottom center
+        """
+        if (not self.use_com_lut) or (self.com_xc is None) or (self.com_zc is None):
+            return 0.0, self.H / 2.0
+
+        # map m_ratio -> total mass (kg) using M0 inferred from total_mass_grid.npy
+        m_ratio = float(np.clip(m_ratio, 0.0, 1.0))
+        total_mass = m_ratio * self.M0
+
+        # IMPORTANT:
+        # Your LUT theta axis already covers [-180, 180], so:
+        # - do NOT use abs(theta)
+        # - do NOT mirror xc with sign(theta)
+        xc = self._bilinear_lookup(self.com_xc, theta, total_mass)
+        zc = self._bilinear_lookup(self.com_zc, theta, total_mass)
+
+        # scale from LUT rocket (43m) to simulation rocket (50m)
+        xc *= self.com_scale
+        zc *= self.com_scale
+        return xc, zc
 
     def render(self, window_name='env', wait_time=1,
                with_trajectory=True, with_camera_tracking=True,

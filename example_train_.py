@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import utils
 import os
 import glob
+import random
 
 from datetime import datetime
 import json
@@ -48,8 +49,15 @@ else:
 # 新增：子文件夹，用于保存对比分析需要的数据
 action_folder = os.path.join(ckpt_folder, "actions")
 mass_folder = os.path.join(ckpt_folder, "mass")
+traj_folder = os.path.join(ckpt_folder, "trajectories")   # 每回合完整轨迹
+metrics_folder = os.path.join(ckpt_folder, "metrics")     # update点/统计指标
+eval_folder = os.path.join(ckpt_folder, "eval")           # 固定频率评估
+
 os.makedirs(action_folder, exist_ok=True)
 os.makedirs(mass_folder, exist_ok=True)
+os.makedirs(traj_folder, exist_ok=True)
+os.makedirs(metrics_folder, exist_ok=True)
+os.makedirs(eval_folder, exist_ok=True)
 
 
 if __name__ == '__main__':
@@ -57,10 +65,54 @@ if __name__ == '__main__':
     max_m_episode = 800000
     max_steps = 800
 
+    SAVE_TRAJ_EVERY = 10  # 每10回合保存一次完整轨迹，避免磁盘爆炸
+    SAVE_ACTION_MASS_EVERY = 1
+
     env = Rocket(task=task, max_steps=max_steps)
     # ckpt_folder = os.path.join('./', task + '_ckpt')
     # if not os.path.exists(ckpt_folder):
     #     os.mkdir(ckpt_folder)
+
+    # ===== Reproducibility (论文对比必须) =====
+    SEED = 12345
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+
+    # ===== Run metadata snapshot =====
+    run_meta = {
+        "run_name": run_name,
+        "task": task,
+        "time": datetime.now().isoformat(),
+        "device": str(device),
+        "seed": SEED,
+        "max_steps": max_steps,
+        "gamma": 0.999,
+        "env": {
+            "state_dims": getattr(env, "state_dims", None),
+            "action_dims": getattr(env, "action_dims", None),
+            "H_sim": getattr(env, "H", None),
+            "use_com_lut": getattr(env, "use_com_lut", None),
+            "H_lut": getattr(env, "H_lut", None),
+            "com_scale": getattr(env, "com_scale", None),
+            "com_dir": getattr(env, "_com_dir", None),
+            "theta_grid_range": [
+                float(env.theta_grid[0]), float(env.theta_grid[-1])
+            ] if getattr(env, "theta_grid", None) is not None else None,
+            "mass_grid_range": [
+                float(env.mass_grid[0]), float(env.mass_grid[-1])
+            ] if getattr(env, "mass_grid", None) is not None else None,
+            "M0_from_grid": getattr(env, "M0", None),
+        },
+        "torch": {
+            "version": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+        }
+    }
+    with open(os.path.join(ckpt_folder, "run_meta.json"), "w") as f:
+        json.dump(run_meta, f, indent=2)
 
     last_episode_id = 0
     REWARDS = []
@@ -89,6 +141,12 @@ if __name__ == '__main__':
         action_log = []
         mass_log = []
 
+        state_log = []
+        reward_log = []
+        done_log = []
+        value_log = []
+        logprob_log = []
+
         for step_id in range(max_steps):
             action, log_prob, value = net.get_action(state)
             state, reward, done, _ = env.step(action)
@@ -96,6 +154,13 @@ if __name__ == '__main__':
             # ★ 新增：记录 action 和质量
             action_log.append(int(action))
             mass_log.append(state[8]*100)
+
+            # ★ 新增：记录完整轨迹（用于论文复盘）
+            state_log.append(state.copy())
+            reward_log.append(float(reward))
+            done_log.append(int(done))
+            value_log.append(float(value.detach().cpu().item()))
+            logprob_log.append(float(log_prob.detach().cpu().item()))
 
             rewards.append(reward)
             log_probs.append(log_prob)
@@ -106,6 +171,17 @@ if __name__ == '__main__':
 
             if done or step_id == max_steps-1:
                 _, _, Qval = net.get_action(state)
+
+                update_meta = {
+                    "episode_id": episode_id,
+                    "step_id": step_id,
+                    "done": int(done),
+                    "Qval": float(Qval.detach().cpu().item()),
+                    "traj_len": int(len(rewards)),
+                }
+                with open(os.path.join(metrics_folder, "update_points.jsonl"), "a") as f:
+                    f.write(json.dumps(update_meta) + "\n")
+
                 net.update_ac(net, rewards, log_probs, values, masks, Qval, gamma=0.999)
                 break
 
@@ -116,8 +192,21 @@ if __name__ == '__main__':
               % (episode_id, np.sum(rewards)))
 
         # ★ 保存动作分布、质量变化曲线
-        np.save(os.path.join(action_folder, f"actions_{episode_id:08d}.npy"), np.array(action_log))
-        np.save(os.path.join(mass_folder, f"mass_{episode_id:08d}.npy"), np.array(mass_log))
+        if episode_id % SAVE_ACTION_MASS_EVERY == 0:
+            np.save(os.path.join(action_folder, f"actions_{episode_id:08d}.npy"), np.array(action_log))
+            np.save(os.path.join(mass_folder, f"mass_{episode_id:08d}.npy"), np.array(mass_log))
+
+        # ★ 保存每回合完整轨迹（强烈建议用于论文）
+        if episode_id % SAVE_TRAJ_EVERY == 0:
+            np.savez_compressed(
+                os.path.join(traj_folder, f"traj_{episode_id:08d}.npz"),
+                states=np.array(state_log, dtype=np.float32),
+                actions=np.array(action_log, dtype=np.int64),
+                rewards=np.array(reward_log, dtype=np.float32),
+                dones=np.array(done_log, dtype=np.int8),
+                values=np.array(value_log, dtype=np.float32),
+                log_probs=np.array(logprob_log, dtype=np.float32),
+            )
 
         # ★ Episode summary 用于未来对比三种动力学版本
         episode_summary = {
@@ -128,8 +217,73 @@ if __name__ == '__main__':
             "action_hist": {str(i): int(action_log.count(i)) for i in set(action_log)}
         }
 
+        # ===== derived metrics for paper =====
+        states_arr = np.array(state_log, dtype=np.float32)
+
+        theta_series = states_arr[:, 4] if len(states_arr) else np.array([])
+        m_series = states_arr[:, 8] if (len(states_arr) and states_arr.shape[1] > 8) else np.array([])
+
+        action_switches = int(np.sum(np.array(action_log[1:]) != np.array(action_log[:-1]))) if len(
+            action_log) > 1 else 0
+        theta_max_abs = float(np.max(np.abs(theta_series))) if len(theta_series) else 0.0
+        theta_rms = float(np.sqrt(np.mean(theta_series ** 2))) if len(theta_series) else 0.0
+
+        xc_range = None
+        zc_range = None
+        if len(states_arr) and states_arr.shape[1] >= 11:
+            xc_series = states_arr[:, 9]
+            zc_series = states_arr[:, 10]
+            xc_range = float(np.max(xc_series) - np.min(xc_series))
+            zc_range = float(np.max(zc_series) - np.min(zc_series))
+
+        episode_summary.update({
+            "reward_per_step": float(np.sum(reward_log) / max(1, len(reward_log))),
+            "action_switches": action_switches,
+            "theta_max_abs": theta_max_abs,
+            "theta_rms": theta_rms,
+            "m_min": float(np.min(m_series)) if len(m_series) else None,
+            "m_final": float(m_series[-1]) if len(m_series) else None,
+            "value_mean": float(np.mean(value_log)) if len(value_log) else None,
+            "value_std": float(np.std(value_log)) if len(value_log) else None,
+            "xc_range": xc_range,
+            "zc_range": zc_range,
+        })
+
         with open(os.path.join(ckpt_folder, "episode_summary.jsonl"), "a") as f:
             f.write(json.dumps(episode_summary) + "\n")
+
+        # ===== Evaluation episodes (paper-grade comparison) =====
+        EVAL_EVERY = 2000
+        N_EVAL = 5
+
+        if episode_id % EVAL_EVERY == 0 and episode_id > last_episode_id:
+            eval_rewards = []
+            np.random.seed(SEED + 999)
+            torch.manual_seed(SEED + 999)
+
+            net.eval()
+            with torch.no_grad():
+                for k in range(N_EVAL):
+                    s = env.reset()
+                    er = 0.0
+                    for t in range(max_steps):
+                        a, _, _ = net.get_action(s)
+                        s, r, d, _ = env.step(a)
+                        er += float(r)
+                        if d:
+                            break
+                    eval_rewards.append(er)
+            net.train()
+
+            eval_summary = {
+                "episode_id": episode_id,
+                "eval_n": N_EVAL,
+                "eval_reward_mean": float(np.mean(eval_rewards)),
+                "eval_reward_std": float(np.std(eval_rewards)),
+                "eval_rewards": [float(x) for x in eval_rewards],
+            }
+            with open(os.path.join(eval_folder, "eval_summary.jsonl"), "a") as f:
+                f.write(json.dumps(eval_summary) + "\n")
 
         if episode_id % 100 == 1:
             plt.figure()

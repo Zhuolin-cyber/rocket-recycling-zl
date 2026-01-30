@@ -30,12 +30,32 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 # =========================
 # 配置：路径
 # =========================
-LUT_DIR = "./LUT_output_OX_pm_pi"
-PATH_X = os.path.join(LUT_DIR, "OX_LUT_xc.npy")
-PATH_Z = os.path.join(LUT_DIR, "OX_LUT_zc.npy")
-PATH_TH = os.path.join(LUT_DIR, "theta_grid_deg.npy")
-PATH_FR = os.path.join(LUT_DIR, "fuel_fraction_grid.npy")
+LUT_MODE = "TOTAL"      # 按需改成 "FU_PM_PI" 或 "OX_PM_PI"
 
+if LUT_MODE == "TOTAL":
+    LUT_DIR = "./LUT_total_output_check"
+    PATH_X  = os.path.join(LUT_DIR, "LUT_total_xc.npy")
+    PATH_Z  = os.path.join(LUT_DIR, "LUT_total_zc.npy")
+    PATH_TH = os.path.join(LUT_DIR, "theta_grid_deg.npy")
+    PATH_FR = os.path.join(LUT_DIR, "total_mass_grid.npy")
+
+elif LUT_MODE == "FU_PM_PI":
+    LUT_DIR = "./LUT_output_FU_pm_pi"
+    PATH_X  = os.path.join(LUT_DIR, "FU_LUT_xc.npy")
+    PATH_Z  = os.path.join(LUT_DIR, "FU_LUT_zc.npy")
+    PATH_TH = os.path.join(LUT_DIR, "theta_grid_deg.npy")
+    # 这里没有 total_mass_grid，就用燃料的 fraction 网格
+    PATH_FR = os.path.join(LUT_DIR, "fuel_fraction_grid.npy")
+
+elif LUT_MODE == "OX_PM_PI":
+    LUT_DIR = "./LUT_output_OX_pm_pi"
+    PATH_X  = os.path.join(LUT_DIR, "OX_LUT_xc.npy")
+    PATH_Z  = os.path.join(LUT_DIR, "OX_LUT_zc.npy")
+    PATH_TH = os.path.join(LUT_DIR, "theta_grid_deg.npy")
+    PATH_FR = os.path.join(LUT_DIR, "fuel_fraction_grid.npy")
+
+else:
+    raise ValueError(f"未知的 LUT_MODE: {LUT_MODE}")
 
 def load_lut():
     for p in (PATH_X, PATH_Z, PATH_TH, PATH_FR):
