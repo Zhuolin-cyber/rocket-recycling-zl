@@ -89,7 +89,7 @@ if __name__ == '__main__':
         "device": str(device),
         "seed": SEED,
         "max_steps": max_steps,
-        "gamma": 0.999,
+        "gamma": 0.99,
         "env": {
             "state_dims": getattr(env, "state_dims", None),
             "action_dims": getattr(env, "action_dims", None),
@@ -146,10 +146,13 @@ if __name__ == '__main__':
         done_log = []
         value_log = []
         logprob_log = []
+        last_info = None
 
         for step_id in range(max_steps):
             action, log_prob, value = net.get_action(state)
-            state, reward, done, _ = env.step(action)
+            state, reward, done, info = env.step(action)
+
+            last_info = info  # 始终覆盖，最终保留“最后一步”的 info
 
             # ★ 新增：记录 action 和质量
             action_log.append(int(action))
@@ -179,10 +182,26 @@ if __name__ == '__main__':
                     "Qval": float(Qval.detach().cpu().item()),
                     "traj_len": int(len(rewards)),
                 }
+
+                # ===== 新增：记录终止信息（或最后一步信息）=====
+                if last_info is not None:
+                    update_meta.update({
+                        "crash": int(bool(last_info.get("crash", False))),
+                        "landing": int(bool(last_info.get("landing", False))),
+                        "fuel_empty": int(bool(last_info.get("fuel_empty", False))),
+                        "env_step_id": int(last_info.get("step_id", -1)),
+
+                        # 你要求的两项（终止时最后一步）
+                        "last_reward": float(last_info.get("last_reward", 0.0)),
+                        "last_v": float(last_info.get("last_v", 0.0)),
+                        "last_vx": float(last_info.get("last_vx", 0.0)),
+                        "last_vy": float(last_info.get("last_vy", 0.0)),
+                    })
+
                 with open(os.path.join(metrics_folder, "update_points.jsonl"), "a") as f:
                     f.write(json.dumps(update_meta) + "\n")
 
-                net.update_ac(net, rewards, log_probs, values, masks, Qval, gamma=0.999)
+                net.update_ac(net, rewards, log_probs, values, masks, Qval, gamma=0.99)
                 break
 
             # print(f"step_id: {step_id}, state: {state}")
@@ -248,6 +267,18 @@ if __name__ == '__main__':
             "xc_range": xc_range,
             "zc_range": zc_range,
         })
+
+        if last_info is not None:
+            episode_summary.update({
+                "crash": int(bool(last_info.get("crash", False))),
+                "landing": int(bool(last_info.get("landing", False))),
+                "fuel_empty": int(bool(last_info.get("fuel_empty", False))),
+                "terminal_step_id_env": int(last_info.get("step_id", -1)),
+                "terminal_reward": float(last_info.get("last_reward", 0.0)),
+                "terminal_v": float(last_info.get("last_v", 0.0)),
+                "terminal_vx": float(last_info.get("last_vx", 0.0)),
+                "terminal_vy": float(last_info.get("last_vy", 0.0)),
+            })
 
         with open(os.path.join(ckpt_folder, "episode_summary.jsonl"), "a") as f:
             f.write(json.dumps(episode_summary) + "\n")

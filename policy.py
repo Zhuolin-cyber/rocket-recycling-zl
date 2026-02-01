@@ -132,11 +132,19 @@ class ActorCritic(nn.Module):
         values = torch.stack(values)
 
         advantage = Qvals - values
-        actor_loss = (-log_probs * advantage.detach()).mean()
+
+        # 1) advantage 标准化（强烈建议）
+        adv_actor = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+
+        actor_loss = (-log_probs * adv_actor.detach()).mean()
         critic_loss = 0.5 * advantage.pow(2).mean()
         ac_loss = actor_loss + critic_loss
 
         network.optimizer.zero_grad()
         ac_loss.backward()
+
+        # 2) 梯度裁剪（强烈建议）
+        torch.nn.utils.clip_grad_norm_(network.parameters(), 1.0)
+
         network.optimizer.step()
 

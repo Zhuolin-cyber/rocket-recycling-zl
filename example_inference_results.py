@@ -15,14 +15,28 @@ if __name__ == '__main__':
     # 调用最新训练的模型
     # ckpt_dir = glob.glob(os.path.join(task + '_ckpt', '*.pt'))[-1]
 
-    ckpt_name = "ckpt_00043001.pt"  # 指定要加载的pt文件名
+    ckpt_name = "ckpt_00030001_C.pt"  # 指定要加载的pt文件名
     ckpt_dir = os.path.join(task + '_ckpt', ckpt_name)
 
     env = Rocket(task=task, max_steps=max_steps)
+    # ---- debug: check env observation dimension ----
+    s0 = env.reset()
+    print("[debug] env.state_dims =", env.state_dims)
+    print("[debug] len(env.reset() state) =", len(s0))
+    # -----------------------------------------------
+
     net = ActorCritic(input_dim=env.state_dims, output_dim=env.action_dims).to(device)
     if os.path.exists(ckpt_dir):
         checkpoint = torch.load(ckpt_dir, map_location=device)
         net.load_state_dict(checkpoint['model_G_state_dict'])
+        sd = checkpoint["model_G_state_dict"]
+        # ---- debug: check checkpoint vs current model ----
+        print("[debug] ckpt actor.linear1.weight:", sd["actor.linear1.weight"].shape)
+        print("[debug] ckpt critic.linear1.weight:", sd["critic.linear1.weight"].shape)
+
+        print("[debug] net  actor.linear1.weight:", net.actor.linear1.weight.shape)
+        print("[debug] net  critic.linear1.weight:", net.critic.linear1.weight.shape)
+        # -----------------------------------------------
 
     n_trials = 200
     distances = []

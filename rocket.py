@@ -286,10 +286,16 @@ class Rocket(object):
             reward = 0
 
         v = (state['vx'] ** 2 + state['vy'] ** 2) ** 0.5
+
+        # 建议：整体降尺度，避免回报动辄上千导致更新爆炸
+        TERM_SCALE = 0.3  # 可从 0.1 ~ 0.5 试
         if self.task == 'landing' and self.already_crash:
-            reward = (reward + 5*np.exp(-1*v/10.)) * (self.max_steps - self.step_id)
-        if self.task == 'landing' and self.already_landing:
-            reward = (1.0 + 5*np.exp(-1*v/10.))*(self.max_steps - self.step_id)
+            reward = (reward + 5*np.exp(-1*v/10.)) * (self.max_steps - self.step_id) * TERM_SCALE
+        elif self.task == 'landing' and self.already_landing:
+            reward = (1.0 + 5*np.exp(-1*v/10.))*(self.max_steps - self.step_id) * TERM_SCALE
+        elif self.task == 'landing' and self.already_fuel_empty:
+            # 燃料耗尽给惩罚，阻止“躺平到没油”
+            reward = -(self.max_steps - self.step_id) * TERM_SCALE
 
         return reward
 
@@ -365,7 +371,21 @@ class Rocket(object):
         else:
             done = False
 
-        return self.flatten(self.state), reward, done, None
+        v = (self.state['vx'] ** 2 + self.state['vy'] ** 2) ** 0.5
+        info = {
+            "crash": bool(self.already_crash),
+            "landing": bool(self.already_landing),
+            "fuel_empty": bool(self.already_fuel_empty),
+            "step_id": int(self.step_id),
+
+            # 你要求新增的两项
+            "last_reward": float(reward),  # 本 step 的 reward（终止时就是终止奖励）
+            "last_v": float(v),  # 本 step 速度模长
+            "last_vx": float(self.state['vx']),
+            "last_vy": float(self.state['vy']),
+        }
+
+        return self.flatten(self.state), reward, done, info
 
     def flatten(self, state):
         xc, zc = self._get_com_from_lut(state['theta'], state['m'])
