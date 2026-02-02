@@ -228,6 +228,9 @@ class Rocket(object):
             reward = (reward + 5*np.exp(-1*v/10.)) * (self.max_steps - self.step_id)
         if self.task == 'landing' and self.already_landing:
             reward = (1.0 + 5*np.exp(-1*v/10.))*(self.max_steps - self.step_id)
+        elif self.task == 'landing' and self.already_fuel_empty:
+            # 燃料耗尽给惩罚，阻止“躺平到没油”
+            reward = -(self.max_steps - self.step_id)
 
         return reward
 
