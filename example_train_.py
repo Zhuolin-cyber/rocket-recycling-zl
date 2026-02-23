@@ -65,8 +65,8 @@ if __name__ == '__main__':
     max_m_episode = 800000
     max_steps = 800
 
-    SAVE_TRAJ_EVERY = 10  # 每10回合保存一次完整轨迹，避免磁盘爆炸
-    SAVE_ACTION_MASS_EVERY = 1
+    SAVE_TRAJ_EVERY = 100  # 每100回合保存一次完整轨迹，避免磁盘爆炸
+    SAVE_ACTION_MASS_EVERY = 100
 
     env = Rocket(task=task, max_steps=max_steps)
     # ckpt_folder = os.path.join('./', task + '_ckpt')
@@ -89,7 +89,7 @@ if __name__ == '__main__':
         "device": str(device),
         "seed": SEED,
         "max_steps": max_steps,
-        "gamma": 0.99,
+        "gamma": 0.999,
         "env": {
             "state_dims": getattr(env, "state_dims", None),
             "action_dims": getattr(env, "action_dims", None),
@@ -201,7 +201,7 @@ if __name__ == '__main__':
                 with open(os.path.join(metrics_folder, "update_points.jsonl"), "a") as f:
                     f.write(json.dumps(update_meta) + "\n")
 
-                net.update_ac(net, rewards, log_probs, values, masks, Qval, gamma=0.99)
+                net.update_ac(net, rewards, log_probs, values, masks, Qval, gamma=0.999)
                 break
 
             # print(f"step_id: {step_id}, state: {state}")
@@ -289,22 +289,52 @@ if __name__ == '__main__':
 
         if episode_id % EVAL_EVERY == 0 and episode_id > last_episode_id:
             eval_rewards = []
-            np.random.seed(SEED + 999)
-            torch.manual_seed(SEED + 999)
 
-            net.eval()
-            with torch.no_grad():
-                for k in range(N_EVAL):
-                    s = env.reset()
-                    er = 0.0
-                    for t in range(max_steps):
-                        a, _, _ = net.get_action(s)
-                        s, r, d, _ = env.step(a)
-                        er += float(r)
-                        if d:
-                            break
-                    eval_rewards.append(er)
-            net.train()
+            # 1) 保存训练用的 RNG 状态（评估结束后恢复，保证不影响训练）
+            py_state = random.getstate()
+            np_state = np.random.get_state()
+            torch_state = torch.get_rng_state()
+            cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+
+            try:
+                # 2) 为评估设置独立 seed（可复现）
+                eval_seed = SEED + 999
+                random.seed(eval_seed)
+                np.random.seed(eval_seed)
+                torch.manual_seed(eval_seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(eval_seed)
+
+                # 3) 使用独立 eval_env，避免动训练 env 的内部状态
+                #    这里懒创建：第一次评估时创建一次，后续复用
+                if "eval_env" not in locals():
+                    eval_env = Rocket(task=task, max_steps=max_steps)
+
+                net.eval()
+                with torch.no_grad():
+                    for k in range(N_EVAL):
+                        s = eval_env.reset()
+                        er = 0.0
+                        for t in range(max_steps):
+                            # 如果 get_action 返回 tensor，确保转换为 Python 标量，避免隐式同步
+                            a, _, _ = net.get_action(s)
+                            if isinstance(a, torch.Tensor):
+                                a = int(a.item())
+                            s, r, d, _ = eval_env.step(a)
+                            er += float(r)
+                            if d:
+                                break
+                        eval_rewards.append(er)
+
+                net.train()
+
+            finally:
+                # 4) 恢复 RNG 状态：评估不会改变后续训练的随机轨迹
+                random.setstate(py_state)
+                np.random.set_state(np_state)
+                torch.set_rng_state(torch_state)
+                if torch.cuda.is_available() and cuda_state is not None:
+                    torch.cuda.set_rng_state_all(cuda_state)
 
             eval_summary = {
                 "episode_id": episode_id,
